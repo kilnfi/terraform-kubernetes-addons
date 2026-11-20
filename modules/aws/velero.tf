@@ -2,27 +2,47 @@ locals {
   velero = merge(
     local.helm_defaults,
     {
-      name                      = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].name
-      chart                     = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].name
-      repository                = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].repository
-      chart_version             = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].version
-      namespace                 = "velero"
-      service_account_name      = "velero"
-      enabled                   = false
-      create_iam_resources_irsa = true
-      iam_policy_override       = null
-      create_bucket             = true
-      bucket                    = "${var.cluster-name}-velero"
-      bucket_force_destroy      = false
-      bucket_enforce_tls        = false
-      allowed_cidrs             = ["0.0.0.0/0"]
-      default_network_policy    = true
-      kms_key_arn_access_list   = []
-      name_prefix               = "${var.cluster-name}-velero"
-      iam_use_name_prefix       = false
+      name                                     = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].name
+      chart                                    = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].name
+      repository                               = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].repository
+      chart_version                            = local.helm_dependencies[index(local.helm_dependencies.*.name, "velero")].version
+      namespace                                = "velero"
+      service_account_name                     = "velero"
+      enabled                                  = false
+      create_iam_resources_irsa                = true
+      iam_policy_override                      = null
+      create_bucket                            = true
+      bucket                                   = "${var.cluster-name}-velero"
+      bucket_noncurrent_version_retention_days = 14
+      bucket_force_destroy                     = false
+      bucket_enforce_tls                       = false
+      allowed_cidrs                            = ["0.0.0.0/0"]
+      default_network_policy                   = true
+      kms_key_arn_access_list                  = []
+      name_prefix                              = "${var.cluster-name}-velero"
+      iam_use_name_prefix                      = false
     },
     var.velero
   )
+
+  velero_bucket_lifecycle_rules = lookup(var.velero, "bucket_lifecycle_rules", [
+    {
+      id     = "expire-noncurrent-versions"
+      status = "Enabled"
+
+      filter = {} # whole bucket
+
+      noncurrent_version_expiration = {
+        noncurrent_days = local.velero["bucket_noncurrent_version_retention_days"]
+      }
+
+      expiration = {
+        expired_object_delete_marker = true
+      }
+
+      abort_incomplete_multipart_upload_days = 7
+    }
+  ])
 
   values_velero = <<VALUES
 metrics:
@@ -175,6 +195,7 @@ module "velero_thanos_bucket" {
   versioning = {
     status = true
   }
+  lifecycle_rule = local.velero_bucket_lifecycle_rules
 
   server_side_encryption_configuration = {
     rule = {
