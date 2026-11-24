@@ -16,6 +16,14 @@ locals {
     var.tigera-operator
   )
 
+  # helm template cannot discover cluster APIs, pass the MutatingAdmissionPolicy version per upstream docs
+  calico-crds_minor_version = length(data.kubernetes_server_version.calico-crds) > 0 ? tonumber(replace(data.kubernetes_server_version.calico-crds[0].minor, "+", "")) : 0
+  calico-crds_api_versions = (
+    local.calico-crds_minor_version >= 36 ? ["admissionregistration.k8s.io/v1/MutatingAdmissionPolicy"] :
+    local.calico-crds_minor_version >= 34 ? ["admissionregistration.k8s.io/v1beta1/MutatingAdmissionPolicy"] :
+    []
+  )
+
   values_tigera-operator = <<-VALUES
     installation:
       kubernetesProvider: EKS
@@ -35,26 +43,41 @@ resource "kubernetes_namespace" "tigera-operator" {
   }
 }
 
-resource "helm_release" "calico-crds" {
-  count                 = local.tigera-operator["enabled"] && local.tigera-operator["manage_crds"] ? 1 : 0
-  repository            = local.tigera-operator["repository"]
-  name                  = format("%s-crds", local.tigera-operator["name"])
-  chart                 = local.tigera-operator["native_crds"] ? "projectcalico.org.v3" : "crd.projectcalico.org.v1"
-  version               = local.tigera-operator["chart_version"]
-  timeout               = local.tigera-operator["timeout"]
-  force_update          = local.tigera-operator["force_update"]
-  wait                  = local.tigera-operator["wait"]
-  atomic                = local.tigera-operator["atomic"]
-  cleanup_on_fail       = local.tigera-operator["cleanup_on_fail"]
-  dependency_update     = local.tigera-operator["dependency_update"]
-  disable_webhooks      = local.tigera-operator["disable_webhooks"]
-  render_subchart_notes = local.tigera-operator["render_subchart_notes"]
-  replace               = local.tigera-operator["replace"]
-  reset_values          = local.tigera-operator["reset_values"]
-  reuse_values          = local.tigera-operator["reuse_values"]
-  skip_crds             = false
-  verify                = local.tigera-operator["verify"]
-  namespace             = local.tigera-operator["create_ns"] ? kubernetes_namespace.tigera-operator.*.metadata.0.name[count.index] : local.tigera-operator["namespace"]
+data "kubernetes_server_version" "calico-crds" {
+  count = local.tigera-operator["enabled"] && local.tigera-operator["manage_crds"] && local.tigera-operator["native_crds"] ? 1 : 0
+}
+
+# CRD charts exceed the 1MB Helm release secret limit, so render them and apply server side as upstream docs do
+# https://docs.tigera.io/calico/latest/getting-started/kubernetes/helm
+data "helm_template" "calico-crds" {
+  count        = local.tigera-operator["enabled"] && local.tigera-operator["manage_crds"] ? 1 : 0
+  repository   = local.tigera-operator["repository"]
+  name         = format("%s-crds", local.tigera-operator["name"])
+  chart        = local.tigera-operator["native_crds"] ? "projectcalico.org.v3" : "crd.projectcalico.org.v1"
+  version      = local.tigera-operator["chart_version"]
+  namespace    = local.tigera-operator["namespace"]
+  api_versions = local.calico-crds_api_versions
+}
+
+data "kubectl_file_documents" "calico-crds" {
+  count   = local.tigera-operator["enabled"] && local.tigera-operator["manage_crds"] ? 1 : 0
+  content = data.helm_template.calico-crds[0].manifest
+}
+
+resource "kubectl_manifest" "calico-crds" {
+  for_each          = local.tigera-operator["enabled"] && local.tigera-operator["manage_crds"] ? { for v in data.kubectl_file_documents.calico-crds[0].documents : lower(join("/", compact([yamldecode(v).apiVersion, yamldecode(v).kind, yamldecode(v).metadata.name]))) => v } : {}
+  yaml_body         = each.value
+  server_side_apply = true
+  force_conflicts   = true
+}
+
+# Drop the former Helm release from state without uninstalling it: uninstall would delete every Calico CRD and CR
+removed {
+  from = helm_release.calico-crds
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "helm_release" "tigera-operator" {
@@ -85,7 +108,7 @@ resource "helm_release" "tigera-operator" {
   namespace = local.tigera-operator["create_ns"] ? kubernetes_namespace.tigera-operator.*.metadata.0.name[count.index] : local.tigera-operator["namespace"]
 
   depends_on = [
-    helm_release.calico-crds,
+    kubectl_manifest.calico-crds,
     kubectl_manifest.prometheus-operator_crds,
   ]
 }
