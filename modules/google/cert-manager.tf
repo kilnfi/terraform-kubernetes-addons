@@ -25,7 +25,7 @@ locals {
         dns_zone_name = "default"
       }
       acme_dns01_provider_route53 = {
-        aws_region = "eu-west1"
+        aws_region = "eu-west-1"
       }
       allowed_cidrs = ["0.0.0.0/0"]
       csi_driver    = false
