@@ -24,6 +24,8 @@ locals {
   values_aws-load-balancer-controller = <<VALUES
 clusterName: ${var.cluster-name}
 region: ${data.aws_region.current.name}
+# Set explicitly so the controller never needs IMDS (nodes can keep hop limit 1)
+vpcId: ${try(data.aws_eks_cluster.aws-load-balancer-controller[0].vpc_config[0].vpc_id, "")}
 serviceAccount:
   name: "${local.aws-load-balancer-controller["service_account_name"]}"
   annotations:
@@ -38,6 +40,11 @@ VALUES
   crds_manifests = local.aws-load-balancer-controller["enabled"] && local.aws-load-balancer-controller["manage_crds"] ? merge([
     for doc in data.kubectl_file_documents.crds : doc.manifests
   ]...) : {}
+}
+
+data "aws_eks_cluster" "aws-load-balancer-controller" {
+  count = local.aws-load-balancer-controller["enabled"] ? 1 : 0
+  name  = var.cluster-name
 }
 
 module "iam_assumable_role_aws-load-balancer-controller" {
